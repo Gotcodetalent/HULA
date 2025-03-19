@@ -166,137 +166,149 @@ control MyIngress(inout headers hdr,
     }
     table edge_forward
     {
-        key = {
-            hdr.ipv4.dstAddr : exact;
-    }
-    actions = {
-        simple_forward;
-}
-size = NUM_HOSTS;
-}
-table get_dst_tor
-{
-    key = {
-        hdr.ipv4.dstAddr : exact;
-}
-actions = {
-    set_dst_tor;
-dummy_dst_tor;
-}
-default_action = dummy_dst_tor;
-}
-table hula_set_nhop
-{
-    key = {
-        standard_metadata.egress_spec : exact;
-}
-actions = {
-    hula_nhop;
-drop;
-}
-size = 1024;
-default_action = drop();
-}
-table set_mcast
-{
-    key = {
-        standard_metadata.ingress_port : exact;
-}
-actions = {
-    set_probe_mcast;
-}
-size = 1024;
-}
-table ecmp_group_to_nhop
-{
-    key = {
-        meta.ecmp_group_id : exact;
-    meta.ecmp_hash : exact;
-}
-actions = {
-    drop;
-set_nhop;
-}
-size = 1024;
-}
-table ipv4_lpm
-{
-    key = {
-        hdr.ipv4.dstAddr : lpm;
-}
-actions = {
-    set_nhop;
-ecmp_group;
-drop;
-}
-size = 1024;
-default_action = drop;
-}
-action update_ingress_statistics()
-{
-    time_t last_update;
-    time_t curr_time = standard_metadata.ingress_global_timestamp;
-    util_t util;
-    dsttor_last_updated.read(last_update, meta.dst_tor);
-    bool condition = (curr_time - last_update > REDUNDANCY_TIME_WINDOW);
-    meta.redundancy = condition ? 1w1 : 1w0;
-    dsttor_last_updated.write(meta.dst_tor, curr_time);
-    bit<32> port = (bit<32>)standard_metadata.ingress_port;
-    port_util.read(util, port);
-    bit<8> delta_t = (bit<8>)(curr_time - last_update);
-    util = (((bit<8>)standard_metadata.packet_length + util) << PROBE_FREQ_FACTOR) - delta_t;
-    util = util >> PROBE_FREQ_FACTOR;
-    port_util.write(port, util);
-}
-apply
-{
-    get_dst_tor.apply();
-    update_ingress_statistics();
-    if (hdr.ipv4.isValid())
-    {
-        if (hdr.probe.isValid())
+        key = 
         {
-            if (meta.redundancy == 0)
+            hdr.ipv4.dstAddr : exact;
+        }
+        actions = 
+        {
+            simple_forward;
+        }
+        size = NUM_HOSTS;
+    }
+    table get_dst_tor
+    {
+        key = 
+        {
+            hdr.ipv4.dstAddr : exact;
+        }
+        actions = 
+        {
+            set_dst_tor;
+            dummy_dst_tor;
+        }
+        default_action = dummy_dst_tor;
+    }
+    table hula_set_nhop
+    {
+        key = 
+        {
+            standard_metadata.egress_spec : exact;
+        }
+        actions = 
+        {
+            hula_nhop;
+            drop;
+        }
+        size = 1024;
+        default_action = drop();
+    }
+    table set_mcast
+    {
+        key = 
+        {
+            standard_metadata.ingress_port : exact;
+        }
+        actions = 
+        {
+            set_probe_mcast;
+        }
+        size = 1024;
+    }
+    table ecmp_group_to_nhop
+    {
+        key = 
+        {
+            meta.ecmp_group_id : exact;
+            meta.ecmp_hash : exact;
+        }
+        actions = 
+        {
+            drop;
+            set_nhop;
+        }
+        size = 1024;
+    }
+    table ipv4_lpm
+    {
+        key = 
+        {
+            hdr.ipv4.dstAddr : lpm;
+        }
+        actions = 
+        {
+            set_nhop;
+            ecmp_group;
+            drop;
+        }
+        size = 1024;
+        default_action = drop;
+    }
+    action update_ingress_statistics()
+    {
+        time_t last_update;
+        time_t curr_time = standard_metadata.ingress_global_timestamp;
+        util_t util;
+        dsttor_last_updated.read(last_update, meta.dst_tor);
+        bool condition = (curr_time - last_update > REDUNDANCY_TIME_WINDOW);
+        meta.redundancy = condition ? 1w1 : 1w0;
+        dsttor_last_updated.write(meta.dst_tor, curr_time);
+        bit<32> port = (bit<32>)standard_metadata.ingress_port;
+        port_util.read(util, port);
+        bit<8> delta_t = (bit<8>)(curr_time - last_update);
+        util = (((bit<8>)standard_metadata.packet_length + util) << PROBE_FREQ_FACTOR) - delta_t;
+        util = util >> PROBE_FREQ_FACTOR;
+        port_util.write(port, util);
+    }
+    apply
+    {
+        get_dst_tor.apply();
+        update_ingress_statistics();
+        if (hdr.ipv4.isValid())
+        {
+            if (hdr.probe.isValid())
             {
-                drop();
+                if (meta.redundancy == 0)
+                {
+                    drop();
+                }
+                else
+                {
+                    @atomic
+                    {
+                        probe_handle_probe();
+                    }
+                    set_mcast.apply();
+                }
             }
             else
             {
                 @atomic
                 {
-                    probe_handle_probe();
+                    read_flowlet_registers();
+                    meta.flowlet_time_diff = standard_metadata.ingress_global_timestamp - meta.flowlet_last_stamp;
+                    if (meta.flowlet_time_diff > FLOWLET_TIMEOUT)
+                    {
+                        update_flowlet_id();
+                    }
                 }
-                set_mcast.apply();
-            }
-        }
-        else
-        {
-            @atomic
-            {
-                read_flowlet_registers();
-                meta.flowlet_time_diff = standard_metadata.ingress_global_timestamp - meta.flowlet_last_stamp;
-                if (meta.flowlet_time_diff > FLOWLET_TIMEOUT)
+
+                @atomic
                 {
-                    update_flowlet_id();
+                    probe_handle_data_packet();
                 }
-            }
 
-            @atomic
-            {
-                probe_handle_data_packet();
-            }
-
-            if (meta.dst_tor == meta.self_id)
-            {
-                edge_forward.apply();
-            }
-            else
-            {
-                hula_set_nhop.apply();
+                if (meta.dst_tor == meta.self_id)
+                {
+                    edge_forward.apply();
+                }
+                else
+                {
+                    hula_set_nhop.apply();
+                }
             }
         }
     }
-}
 }
 
 /*************************************************************************
